@@ -19,6 +19,7 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 INSTALL_REQUIRES = [
     # NOTE: Add dependencies
     "psutil",
+    "onnxruntime",  # used by scripts/export_onnx.py for ONNX export + parity check
 ]
 
 # Installation operation
