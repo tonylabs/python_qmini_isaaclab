@@ -1,0 +1,1 @@
+from .qmini import BDX_R_CFG # noqa: F401
