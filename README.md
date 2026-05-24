@@ -46,6 +46,11 @@ python scripts/rsl_rl/train.py --task=qmini-velocity --headless --resume --load_
 
 ```bash
 python scripts/rsl_rl/play.py --task=qmini-velocity-play --num_envs 100
+
+#If you ever need to be explicit, override with --load_run and --checkpoint:
+
+python scripts/rsl_rl/play.py --task=qmini-velocity-play --num_envs 100 \
+    --load_run <date> --checkpoint model_<?>.pt
 ```
 
 ---
