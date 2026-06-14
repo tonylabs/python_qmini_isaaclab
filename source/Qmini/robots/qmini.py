@@ -36,7 +36,7 @@ BDX_R_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.45),
         joint_pos={
-            # Mirrored bipedal crouch pose migrated from RoboTamer4Qmini (Isaac Gym)
+            # Mirrored bipedal crouch pose
             "hip_yaw_l":      0.4,
             "hip_roll_l":    -0.1,
             "hip_pitch_l":   -1.5,
