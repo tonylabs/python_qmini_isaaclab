@@ -34,19 +34,24 @@ BDX_R_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.45),
+        # Statically-stable standing pose. Found with scripts/find_stand_pose.py, which drops the
+        # robot free-base under its own PD actuators and searches for a pose that stays upright with
+        # both feet planted (verified: tilt ~0.1 deg, residual joint speed ~0.03 rad/s). A zero
+        # action holds this pose, so zero_agent.py now shows a stable stand. The legs are a little
+        # more extended than the 0.31 m reward target because this robot cannot balance the deeper
+        # crouch passively (no policy) — training pulls it down to the target height.
+        pos=(0.0, 0.0, 0.4272),
         joint_pos={
-            # Mirrored bipedal crouch pose
-            "hip_yaw_l":      0.4,
-            "hip_roll_l":    -0.1,
-            "hip_pitch_l":   -1.5,
-            "knee_pitch_l":   1.0,
-            "ankle_pitch_l": -1.3,
-            "hip_yaw_r":     -0.4,
-            "hip_roll_r":    0.1,
-            "hip_pitch_r":    1.5,
-            "knee_pitch_r":  -1.0,
-            "ankle_pitch_r":  1.3,
+            "hip_yaw_l":      0.4450,
+            "hip_roll_l":    -0.0100,
+            "hip_pitch_l":   -1.5000,
+            "knee_pitch_l":   1.2500,
+            "ankle_pitch_l": -1.0200,
+            "hip_yaw_r":     -0.4450,
+            "hip_roll_r":     0.0100,
+            "hip_pitch_r":    1.5000,
+            "knee_pitch_r":  -1.2500,
+            "ankle_pitch_r":  1.0200,
         },
     ),
     actuators={
