@@ -62,3 +62,5 @@ datasets
 
 # ONNX Policy
 /policy.onnx
+# MuJoCo viewer log
+MUJOCO_LOG.TXT
