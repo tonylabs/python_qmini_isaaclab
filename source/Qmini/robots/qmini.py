@@ -16,10 +16,10 @@ BDX_R_CFG = ArticulationCfg(
         merge_fixed_joints=True,
         replace_cylinders_with_capsules=False,
         # The URDF lives in the qmini_description submodule (checked out at assets/qmini) and
-        # references its meshes as package://qmini_description/... . Isaac Sim resolves that URI by
-        # looking for a directory literally named `qmini_description` on the URDF's path, so we go
-        # through the assets/qmini_description -> qmini symlink instead of assets/qmini directly.
-        asset_path=str(Path(__file__).resolve().parents[1] / "assets/qmini_description/urdf/qmini_description.urdf"),
+        # references its meshes as package://qmini_description/... . The importer's resolveXrefPath
+        # strips the package name and searches the URDF's parent directories, so meshes/ inside
+        # assets/qmini is found without any qmini_description directory on disk.
+        asset_path=str(Path(__file__).resolve().parents[1] / "assets/qmini/urdf/qmini_description.urdf"),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
