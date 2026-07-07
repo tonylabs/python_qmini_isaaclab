@@ -66,7 +66,10 @@ class CommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.02,
+        # 20% of envs hold a zero command: standing is a first-class skill for the
+        # joystick use-case (zero input -> stand), and the pushes above train balance
+        # recovery while standing, not just while walking.
+        rel_standing_envs=0.2,
         rel_heading_envs=1.0,
         heading_command=True,
         heading_control_stiffness=0.5,
@@ -174,6 +177,16 @@ class ObservationsCfg:
 
 
 
+# --- Foot clearance target (single knob for how high the legs lift) ---
+# The clearance rewards measure the ankle_pitch body ORIGIN's world z, and that
+# origin sits ~0.0875 m above the ground when the sole is flat (qmini_description
+# URDF, measured in MuJoCo at the default stand pose). To change how high the
+# robot lifts its feet, edit FOOT_SOLE_CLEARANCE only — retrain afterwards.
+ANKLE_ORIGIN_HEIGHT = 0.0875  # m, 脚踝原点固定偏移，不要动
+FOOT_SOLE_CLEARANCE = 0.05    # m, 想要的脚底离地高度只改这一个
+FOOT_TARGET_HEIGHT = ANKLE_ORIGIN_HEIGHT + FOOT_SOLE_CLEARANCE
+
+
 @configclass
 class QminiRewards(RewardsCfg):
     """Reward terms for the MDP."""
@@ -219,7 +232,7 @@ class QminiRewards(RewardsCfg):
         params={
             "std": 0.05,
             "tanh_mult": 2.0,
-            "target_height": 0.1,
+            "target_height": FOOT_TARGET_HEIGHT,
             "asset_cfg": SceneEntityCfg("robot", body_names="ankle_pitch_.*"),
         },
     )
@@ -236,7 +249,14 @@ class QminiRewards(RewardsCfg):
         func=mdp.base_height_l2,
         weight=-2,  # Tune this weight as needed
         params={
-            "target_height": 0.30846,
+            # Natural standing height of the default pose on the qmini_description
+            # URDF (hip_pitch 0.25 / knee 0.4 / ankle 0.18 settles at ~0.40 m).
+            # The previous 0.30846 came from the OLD URDF's geometry: it paid the
+            # policy to get 9 cm lower than the pose allows, and pitching forward
+            # is a cheap way to lower the base — a trained-in permanent tilt
+            # (~10 deg, confirmed in sim2sim). Keep this consistent with
+            # init_state.joint_pos whenever the default pose changes.
+            "target_height": 0.38,
             "asset_cfg": SceneEntityCfg(name="robot", body_names=["base_link"]),
         },
     )
@@ -278,15 +298,24 @@ class QminiRewards(RewardsCfg):
         weight=1.5,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="ankle_pitch_.*"),
-            "target_height": 0.08,
-            "std": 0.005,
+            # The old hard-coded 0.08 was BELOW the standing ankle height — keeping
+            # the feet planted already earned ~99% of this term, which trained in a
+            # foot-dragging gait (2026-07-06 run).
+            "target_height": FOOT_TARGET_HEIGHT,
+            # Wide enough that the planted-foot state still sees a gradient toward
+            # lifting instead of a flat ~0 reward. If FOOT_SOLE_CLEARANCE goes past
+            # ~0.10, widen this to 0.015-0.02 as well.
+            "std": 0.01,
             "frequency": 1.5,
             "static_threshold": 0.15,
         },
     )
     foot_phase_support = RewTerm(
         func=mdp.foot_phase_support,
-        weight=0.7,
+        # 0.7 → 1.5: lock the step rhythm to the 1.5 Hz phase clock. The 2026-07-06
+        # policy chattered at ~8 touchdowns/s with 0% double support — stance-phase
+        # contact needs to outweigh the micro-stepping exploit of air_time.
+        weight=1.5,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_pitch_.*"),
             "threshold": 1.0,
@@ -367,11 +396,49 @@ class EventCfg:
             "velocity_range": (0.0, 0.0),
         },
     )
+    # Random base-velocity impulses every few seconds. The old Isaac Gym project that
+    # transferred to hardware pushed every ~3 s at ±0.5 m/s — this is the single most
+    # important robustness event for a light biped; do not zero it out again.
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(10.0, 15.0),
-        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
+        interval_range_s=(3.0, 6.0),
+        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-0.5, 0.5)}},
+    )
+
+    # PD gain mismatch between sim and the real motor drivers (×0.8-1.2, the
+    # hardware-proven range) — resampled on every reset.
+    randomize_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.8, 1.2),
+            "damping_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    # battery / payload / build variation: scale every link mass a little...
+    scale_body_masses = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "mass_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+        },
+    )
+
+    # ...and shift the base CoM (cabling, battery placement)
+    randomize_base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "com_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02), "z": (-0.02, 0.02)},
+        },
     )
 @configclass
 class TerminationsCfg:
@@ -441,16 +508,15 @@ class QminiEnvCfg(LocomotionVelocityRoughEnvCfg):
 # actions
         self.actions.joint_pos.scale = 0.5
 
-        # events
-        self.events.push_robot.params["velocity_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0)}
-        #self.events.push_robot = None
-        self.rewards.feet_air_time = None 
+        # events — ranges follow the hardware-proven Isaac Gym recipe (qmini_official_rl)
+        self.rewards.feet_air_time = None
         self.events.add_base_mass.params["asset_cfg"].body_names = ["base_link"]
-        self.events.add_base_mass.params["mass_distribution_params"] = (-0.5, 0.5)
+        self.events.add_base_mass.params["mass_distribution_params"] = (-0.6, 0.7)
         self.events.reset_robot_joints.params["position_range"] = (0.8, 1.2)
+        self.events.reset_robot_joints.params["velocity_range"] = (-1.0, 1.0)
         self.events.base_external_force_torque.params["asset_cfg"].body_names = ["base_link"]
-        self.events.physics_material.params["static_friction_range"] = (0.1, 2)
-        self.events.physics_material.params["dynamic_friction_range"] = (0.1, 2)
+        self.events.physics_material.params["static_friction_range"] = (0.2, 1.5)
+        self.events.physics_material.params["dynamic_friction_range"] = (0.2, 1.5)
         self.events.physics_material.params["asset_cfg"].body_names = "ankle_pitch_.*"
         self.scene.terrain = TerrainImporterCfg(
             prim_path="/World/ground",
@@ -492,14 +558,20 @@ class QminiEnvCfg(LocomotionVelocityRoughEnvCfg):
         
 
         self.events.reset_base.params = {
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "pose_range": {
+                "x": (-0.5, 0.5),
+                "y": (-0.5, 0.5),
+                "yaw": (-3.14, 3.14),
+                "roll": (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+            },
             "velocity_range": {
-                "x": (0.0, 0.0),
-                "y": (0.0, 0.0),
+                "x": (-0.3, 0.3),
+                "y": (-0.3, 0.3),
                 "z": (0.0, 0.0),
                 "roll": (0.0, 0.0),
                 "pitch": (0.0, 0.0),
-                "yaw": (0.0, 0.0),
+                "yaw": (-0.3, 0.3),
             },
         }
 
@@ -514,7 +586,11 @@ class QminiEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.track_ang_vel_z_exp.weight = 5.0
         self.rewards.action_rate_l2.weight =-0.05     
         self.rewards.dof_acc_l2.weight =-1.25e-7      
-        self.rewards.flat_orientation_l2.weight = -2
+        # Anti-tilt: at -2 a 10 deg lean cost only ~0.06/step (2*sin^2) — invisible
+        # next to tracking rewards of ~5-10/step, so the policy happily stood and
+        # walked with a permanent ~10 deg pitch (measured in sim2sim). -10 makes
+        # 10 deg cost ~0.3/step while 2-3 deg stays cheap.
+        self.rewards.flat_orientation_l2.weight = -10
 
         # Walk
         self.commands.base_velocity.ranges.lin_vel_x = (-0.4,0.7)

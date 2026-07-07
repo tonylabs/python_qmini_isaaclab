@@ -1,0 +1,3 @@
+[submodule "source/Qmini/assets/qmini"]
+	path = source/Qmini/assets/qmini
+	url = https://github.com/tonylabs/qmini_description

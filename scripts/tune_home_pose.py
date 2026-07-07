@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Find a statically-stable standing pose for a legged robot — and (optionally) patch it into the robot cfg.
+"""Find a statically-stable standing pose for Qmini and write it into the robot cfg.
 
 Why this exists
 ---------------
@@ -23,7 +23,7 @@ How it works
    ``joint_pos`` as the PD hold target (identical to a zero action), drop it, and let it settle.
    If it stays upright with both feet planted, great — report the rest height.
 
-2. SEARCH (if the candidate is unstable, or ``--search`` is forced): pin the base in the air and
+2. SEARCH (if the candidate is unstable): pin the base in the air and
    use the sim as forward kinematics. Run a left/right-symmetric coordinate descent over the leg
    joints to satisfy the three conditions of a static stand:
        * feet level (equal height),
@@ -31,28 +31,25 @@ How it works
        * flat soles, at a target crouch height.
    Then drop the winning pose free-base to confirm it stands and measure the true rest height.
 
-3. REPORT / WRITE: print a ready-to-paste ``joint_pos`` dict + spawn ``pos.z``, and with
-   ``--write`` patch them straight into the robot cfg file.
+3. REPORT + WRITE: print the resulting ``joint_pos`` dict + spawn ``pos.z`` and patch them
+   straight into the robot cfg file.
 
-It is deliberately robot-agnostic — point ``--robot-module`` / ``--robot-cfg`` / ``--source-file``
-at any robot whose ArticulationCfg follows the same pattern and reuse it. Left/right joints are
-paired by their ``_l`` / ``_r`` suffix and mirrored with the sign convention found in the existing
-default pose (disable with ``--no-symmetry``).
+This tool is Qmini-specific: it always loads ``BDX_R_CFG`` from ``Qmini.robots.qmini`` and
+always writes the verified pose back into ``source/Qmini/robots/qmini.py``. Left/right joints are paired by
+their ``_l`` / ``_r`` suffix and mirrored with the sign convention found in the existing
+default pose.
 
 Examples
 --------
-Find a stable pose for Qmini and WRITE it back, headless::
+Verify the current pose — and, if it is unstable, search for a stable one — then write
+the result into the robot cfg::
 
-    python scripts/find_stand_pose.py --write --headless
+    python scripts/tune_home_pose.py --headless
 
-Just check the current pose (watch it in the viewer), no search, no file changes::
+Same, but watch it in the viewer::
 
-    python scripts/find_stand_pose.py --no-search
+    python scripts/tune_home_pose.py
 
-Reuse on another robot::
-
-    python scripts/find_stand_pose.py --robot-module my_pkg.robots.foo --robot-cfg FOO_CFG \
-        --source-file source/my_pkg/robots/foo.py --write --headless
 """
 
 from __future__ import annotations
@@ -64,30 +61,18 @@ from isaaclab.app import AppLauncher
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Find (and optionally write) a stable standing pose for a robot.")
-parser.add_argument("--robot-module", type=str, default="Qmini.robots.qmini", help="Module defining the ArticulationCfg.")
-parser.add_argument("--robot-cfg", type=str, default="BDX_R_CFG", help="Name of the ArticulationCfg in --robot-module.")
-parser.add_argument(
-    "--source-file",
-    type=str,
-    default="source/Qmini/robots/qmini.py",
-    help="File to patch with --write (contains init_state.joint_pos / pos).",
-)
+parser = argparse.ArgumentParser(description="Find a stable standing pose for Qmini and write it into the robot cfg.")
 parser.add_argument("--settle-time", type=float, default=5.0, help="Seconds to let the robot settle (free-base verify).")
 parser.add_argument("--clearance", type=float, default=0.02, help="Extra metres above measured rest height for spawn pos.z.")
-parser.add_argument("--upright-tol-deg", type=float, default=15.0, help="Max base tilt (deg) still considered standing.")
+parser.add_argument("--upright-tol-deg", type=float, default=10.0, help="Max base tilt (deg) still considered standing.")
 parser.add_argument(
     "--target-height",
     type=float,
-    default=0.308,
+    default=0.38,
     help="Desired base standing height (m). Defaults to the env's base_height_deviation target so "
-    "the stand pose matches the crouch the rewards expect. Guides the search only; "
+    "the stand pose matches the height the rewards expect. Guides the search only; "
     "the reported spawn height is measured from the real free-base settle.",
 )
-parser.add_argument("--search", dest="search", action="store_true", default=True, help="Search for a stable pose (default on).")
-parser.add_argument("--no-search", dest="search", action="store_false", help="Only verify the current pose; never search.")
-parser.add_argument("--no-symmetry", dest="symmetry", action="store_false", default=True, help="Optimise legs independently.")
-parser.add_argument("--write", action="store_true", help="Patch joint_pos + spawn pos.z into --source-file.")
 parser.add_argument("--sim-dt", type=float, default=0.005, help="Physics timestep (default matches the env: 200 Hz).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -98,7 +83,6 @@ simulation_app = app_launcher.app
 # ---------------------------------------------------------------------------
 # Post-launch imports
 # ---------------------------------------------------------------------------
-import importlib
 import re
 from pathlib import Path
 
@@ -111,11 +95,9 @@ from isaaclab.utils.math import euler_xyz_from_quat
 
 
 def load_robot_cfg() -> ArticulationCfg:
-    module = importlib.import_module(args_cli.robot_module)
-    cfg = getattr(module, args_cli.robot_cfg)
-    if not isinstance(cfg, ArticulationCfg):
-        raise TypeError(f"{args_cli.robot_cfg} is {type(cfg)}, expected ArticulationCfg")
-    return cfg
+    from Qmini.robots.qmini import BDX_R_CFG
+
+    return BDX_R_CFG
 
 
 def upright_angle_deg(robot: Articulation) -> torch.Tensor:
@@ -272,18 +254,13 @@ def search_pose(robot, sim, foot_ids, masses, limits, default) -> torch.Tensor:
     """
     device = robot.device
     nj = len(robot.joint_names)
-    if args_cli.symmetry:
-        params = build_symmetry(list(robot.joint_names), default)
-        p_vals = torch.tensor([default[0, li].item() for (_, li, _, _) in params], device=device)
-        lo = torch.tensor([limits[li, 0].item() for (_, li, _, _) in params], device=device)
-        hi = torch.tensor([limits[li, 1].item() for (_, li, _, _) in params], device=device)
-        to_full = lambda pv: expand(params, pv, nj, device)
-        labels = [b for (b, _, _, _) in params]
-    else:  # optimise every joint independently
-        p_vals = default[0].clone()
-        lo, hi = limits[:, 0].clone(), limits[:, 1].clone()
-        to_full = lambda pv: pv.view(1, -1).clone()
-        labels = list(robot.joint_names)
+    # legs are always optimised as left/right-symmetric pairs (see build_symmetry)
+    params = build_symmetry(list(robot.joint_names), default)
+    p_vals = torch.tensor([default[0, li].item() for (_, li, _, _) in params], device=device)
+    lo = torch.tensor([limits[li, 0].item() for (_, li, _, _) in params], device=device)
+    hi = torch.tensor([limits[li, 1].item() for (_, li, _, _) in params], device=device)
+    to_full = lambda pv: expand(params, pv, nj, device)
+    labels = [b for (b, _, _, _) in params]
 
     npar = len(p_vals)
     sag = [i for i, l in enumerate(labels) if "pitch" in l]  # hip_pitch, knee_pitch, ankle_pitch
@@ -375,8 +352,9 @@ def main():
     print("\n[INFO] joint order:", joint_names)
 
     # locate the foot bodies (leaf links of each leg) for the FK objective
-    foot_l = robot.body_names.index([b for b in robot.body_names if b.startswith("ankle") and b.endswith("_l")][0])
-    foot_r = robot.body_names.index([b for b in robot.body_names if b.startswith("ankle") and b.endswith("_r")][0])
+    # accept both bare (`ankle_pitch_l`) and ROS-style (`ankle_pitch_l_link`) leaf-link names
+    foot_l = robot.body_names.index([b for b in robot.body_names if b.startswith("ankle") and re.search(r"_l(_link)?$", b)][0])
+    foot_r = robot.body_names.index([b for b in robot.body_names if b.startswith("ankle") and re.search(r"_r(_link)?$", b)][0])
     foot_ids = [foot_l, foot_r]
     limits = robot.data.joint_pos_limits[0]  # (nj, 2)
     default = robot.data.default_joint_pos.clone()
@@ -392,7 +370,7 @@ def main():
     )
 
     # ---- 2. search if needed ------------------------------------------------
-    if not stable and args_cli.search:
+    if not stable:
         print("\n[INFO] current pose is unstable — searching for a stable standing pose ...")
         target = search_pose(robot, sim, foot_ids, masses, limits, default)
         # full-length free-base verify from just above the target crouch height (gentle landing)
@@ -420,17 +398,13 @@ def main():
     print(fmt_joint_dict(joint_names, final))
     print("        },")
 
-    if args_cli.write:
-        src = Path(args_cli.source_file)
-        if not src.is_absolute():
-            src = Path(__file__).resolve().parents[1] / src
-        if not src.exists():
-            print(f"\n[ERROR] --source-file not found: {src}")
-        else:
-            print(f"\n[WRITE] patching {src} ...")
-            patch_source_file(src, joint_names, final, final_spawn_z)
+    # the verified pose is always written into the Qmini robot cfg
+    src = Path(__file__).resolve().parents[1] / "source/Qmini/robots/qmini.py"
+    if not src.exists():
+        print(f"\n[ERROR] robot cfg not found: {src}")
     else:
-        print("\n[INFO] dry run — re-run with --write to patch the values into the robot cfg file.")
+        print(f"\n[WRITE] patching {src} ...")
+        patch_source_file(src, joint_names, final, final_spawn_z)
 
 
 if __name__ == "__main__":
